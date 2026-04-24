@@ -33,6 +33,13 @@ mu = np.abs(gamma) / np.sqrt(phi1 * phi2 + 1e-10)
 peak = int(np.argmax(mu))
 print(f"Sync peak at baseband sample {peak}")
 
+# matlab uses deprecated method to generate this
+# thus it needs to be hardcoded to work in python
+def get_P():
+    return np.array([
+        1, -1, -1, 1, -1, -1, -1, -1, 1, 1, 1, 1, -1, -1, -1, -1, 1, 1, -1, 1, -1, -1, 1, -1, 1, 1, 1, -1, -1, 1, -1, 1, -1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, 1, -1, -1, 1, 1, 1, 1, 1, -1, 1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, -1
+    ])
+
 
 def estimate_channel(X_pilot, X_length):
     """H estimate combining length-symbol (known 1+1j) and pilot-symbol (known |value|=2)."""
@@ -53,9 +60,7 @@ def estimate_channel(X_pilot, X_length):
     #   X_pilot[2k] = 2 * P[k] * H[2k]  ->  P[k] = sign(Re(X_pilot[2k] / H[2k] / 2))
     raw = X_pilot[even_idx] / (2 * H_init[even_idx])
     # Use whichever of real/imag has larger magnitude (more reliable)
-    P = np.where(np.abs(raw.real) >= np.abs(raw.imag),
-                 np.sign(raw.real), np.sign(raw.imag))
-    P = np.where(P == 0, 1.0, P)
+    P = get_P()
     H_from_pilot = X_pilot[even_idx] / (2 * P)
 
     # Combine: pilot gives H at even subcarriers, length gives H at 15..127
