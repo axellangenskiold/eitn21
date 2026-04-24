@@ -7,7 +7,7 @@
 clear; close all; clc;
 
 % --- Load signal (same file as notebook) ---
-matPath = '/Users/alicewesterberg/Desktop/wirelessproject/eitn21/Signals_task3/signal3.mat';
+matPath = '/Users/axellangenskiold/eitn21/Signals_task3/signal3.mat';
 S = load(matPath);
 if isfield(S,'R')
     r = S.R(:);
