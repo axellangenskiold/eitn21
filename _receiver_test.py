@@ -1,4 +1,4 @@
-"""Clean Task 3 receiver, v2: combine pilot + length symbol for channel est."""
+"""Clean Task 3 receiver, v3: length-symbol channel est + phase-slope correction."""
 import numpy as np
 import scipy.io
 from scipy.signal import butter, filtfilt, savgol_filter
@@ -11,6 +11,7 @@ r = data['R'].flatten()
 fs, fc = 44100, 10000
 Nsc, Ncp = 128, 20
 Tsym = 58e-3
+RUN_EXHAUSTIVE = False
 
 n = np.arange(len(r))
 r_I = 2 * r * np.cos(2 * np.pi * fc * n / fs)
@@ -41,52 +42,46 @@ def get_P():
     ])
 
 
-def estimate_channel(X_pilot, X_length):
-    """H estimate combining length-symbol (known 1+1j) and pilot-symbol (known |value|=2)."""
-    # Length symbol: subcarriers 15..127 are 1+1j
+def estimate_channel(X_length):
+    """Estimate H[k] from the length OFDM symbol only.
+
+    In practice this is more stable on this recording than averaging in the
+    pilot estimate, which injects errors on the later payload symbols.
+    """
     known_idx = np.arange(15, Nsc)
-    H_from_length = X_length[known_idx] / (1 + 1j)
+    H_known = X_length[known_idx] / (1 + 1j)
+    H = (np.interp(np.arange(Nsc), known_idx, H_known.real)
+         + 1j * np.interp(np.arange(Nsc), known_idx, H_known.imag))
+    return savgol_filter(H.real, 7, 3) + 1j * savgol_filter(H.imag, 7, 3)
 
-    # Pilot symbol: even subcarriers have 2*P (P = +-1). Only |H| is easily recovered
-    # per subcarrier; the sign of P is unknown. Use the length-based H (after smoothing)
-    # to resolve the sign, then take the pilot measurement / (2P) for even subcarriers.
-    even_idx = np.arange(0, Nsc, 2)
 
-    # Initial smooth H from length symbol (interpolate to all subcarriers)
-    H_init = (np.interp(np.arange(Nsc), known_idx, H_from_length.real)
-              + 1j * np.interp(np.arange(Nsc), known_idx, H_from_length.imag))
+def nearest_qpsk(symbols):
+    return np.where(symbols.real >= 0, 1.0, -1.0) + 1j * np.where(symbols.imag >= 0, 1.0, -1.0)
 
-    # Recover P[k] for even subcarriers
-    #   X_pilot[2k] = 2 * P[k] * H[2k]  ->  P[k] = sign(Re(X_pilot[2k] / H[2k] / 2))
-    raw = X_pilot[even_idx] / (2 * H_init[even_idx])
-    # Use whichever of real/imag has larger magnitude (more reliable)
-    P = get_P()
-    H_from_pilot = X_pilot[even_idx] / (2 * P)
 
-    # Combine: pilot gives H at even subcarriers, length gives H at 15..127
-    H = np.empty(Nsc, dtype=complex)
-    for k in range(Nsc):
-        if k in known_idx and k in even_idx:
-            # average the two estimates
-            j_len = np.where(known_idx == k)[0][0]
-            j_pil = np.where(even_idx == k)[0][0]
-            H[k] = 0.5 * (H_from_length[j_len] + H_from_pilot[j_pil])
-        elif k in known_idx:
-            j_len = np.where(known_idx == k)[0][0]
-            H[k] = H_from_length[j_len]
-        elif k in even_idx:
-            j_pil = np.where(even_idx == k)[0][0]
-            H[k] = H_from_pilot[j_pil]
-        else:
-            H[k] = 0  # odd subcarrier below index 15, need interpolation
-    # Fill odd subcarriers below 15 by linear interpolation from nearest known
-    for k in range(1, 15, 2):
-        H[k] = 0.5 * (H[k - 1] + H[k + 1])
+def correct_phase_slope(X_data, used_qpsk, n_iter=2):
+    """Correct a per-symbol linear phase ramp across subcarriers.
 
-    # Light smoothing to reduce noise
-    if len(H) >= 7:
-        H = (savgol_filter(H.real, 7, 3) + 1j * savgol_filter(H.imag, 7, 3))
-    return H
+    A small residual timing mismatch shows up as a phase slope over subcarrier
+    index rather than as a common phase offset. This is estimated from hard
+    QPSK decisions and removed iteratively.
+    """
+    corrected = X_data.copy()
+    k_full = np.arange(Nsc)
+    active_counts = [Nsc] * corrected.shape[0]
+    active_counts[-1] = used_qpsk - Nsc * (corrected.shape[0] - 1)
+
+    for _ in range(n_iter):
+        for i, n_active in enumerate(active_counts):
+            z = corrected[i, :n_active]
+            q = nearest_qpsk(z)
+            phase = np.unwrap(np.angle(z * np.conj(q)))
+            if len(phase) < 8:
+                continue
+            slope, intercept = np.polyfit(np.arange(n_active), phase, 1)
+            corrected[i] *= np.exp(-1j * (slope * k_full + intercept))
+
+    return corrected
 
 
 def try_decode(t0, g2_poly, search_length=None):
@@ -97,7 +92,7 @@ def try_decode(t0, g2_poly, search_length=None):
     blocks = r_bb[t0 : t0 + n_sym * (Nsc + Ncp)].reshape(n_sym, Nsc + Ncp)
     X = np.fft.fft(blocks[:, Ncp:], axis=1)
 
-    H_full = estimate_channel(X[0], X[1])
+    H_full = estimate_channel(X[1])
 
     # Decode length
     X_len_eq = X[1, :15] / H_full[:15]
@@ -116,7 +111,9 @@ def try_decode(t0, g2_poly, search_length=None):
         n_data = int(np.ceil((7 * l_m + 5) / Nsc))
         if n_sym < 2 + n_data:
             continue
+        used_qpsk = 7 * l_m + 5
         X_data = X[2 : 2 + n_data] / H_full
+        X_data = correct_phase_slope(X_data, used_qpsk)
         bits_data = np.empty(X_data.size * 2, dtype=int)
         bits_data[0::2] = (X_data.real < 0).flatten().astype(int)
         bits_data[1::2] = (X_data.imag < 0).flatten().astype(int)
@@ -155,16 +152,19 @@ print(f"\nBest single decode: g2=0o{best['g2']:o}, t0={best['t0']}, "
 print(f"Message: {best['msg']}")
 
 # Try length search too (assume length decode may be wrong, search over plausible values)
-print("\n--- Exhaustive length search ---")
-best2 = None
-for g2 in (0o45, 0o51):
-    for offset in range(-Ncp - 5, 5):
-        t0 = peak + offset
-        res = try_decode(t0, g2, search_length=range(50, 200))
-        if res is None:
-            continue
-        if best2 is None or res['score'] > best2['score']:
-            best2 = {**res, 'g2': g2}
+if RUN_EXHAUSTIVE:
+    print("\n--- Exhaustive length search ---")
+    best2 = None
+    for g2 in (0o45, 0o51):
+        for offset in range(-Ncp - 5, 5):
+            t0 = peak + offset
+            res = try_decode(t0, g2, search_length=range(50, 200))
+            if res is None:
+                continue
+            if best2 is None or res['score'] > best2['score']:
+                best2 = {**res, 'g2': g2}
 
-print(f"Best: g2=0o{best2['g2']:o}, t0={best2['t0']}, l_m={best2['l_m']}, score={best2['score']:.3f}")
-print(f"Message: {best2['msg']}")
+    print(f"Best: g2=0o{best2['g2']:o}, t0={best2['t0']}, l_m={best2['l_m']}, score={best2['score']:.3f}")
+    print(f"Message: {best2['msg']}")
+else:
+    print("\n--- Exhaustive length search skipped ---")
