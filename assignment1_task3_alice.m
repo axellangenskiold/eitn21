@@ -14,7 +14,7 @@ Tsym = 58e-3;    % OFDM symbol duration (data portion) [s]
 Nofdm = Nsc + Ncp;
 
 %% 1. Load signal
-data = load('Signals_task3/signal3.mat');
+data = load('/Users/axellangenskiold/eitn21/Signals_task3/signal3.mat');
 r = double(data.R(:));
 
 %% 2. Demodulation — down-convert from fc to baseband
@@ -133,7 +133,7 @@ trellis = poly2trellis(6, [77 45]);
 
 % --- Decode message length ---
 % Length: 10 data bits + 5 tail bits -> 15 input bits -> 30 encoded bits
-dec_len = vitdec(bits_len(1:30), trellis, 35, 'term', 'hard');
+dec_len = vitdec(bits_len(1:30), trellis, 15, 'term', 'hard');
 l_m = sum(dec_len(1:10)' .* (2.^(9:-1:0))');
 fprintf('Decoded message length: %d characters\n', l_m);
 
